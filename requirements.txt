@@ -1,0 +1,4 @@
+fastapi
+uvicorn
+playwright-core
+python-dotenv
