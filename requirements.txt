@@ -1,4 +1,4 @@
 fastapi
 uvicorn
-playwright-core
+playwright
 python-dotenv
