@@ -5,9 +5,23 @@ import asyncio
 
 app = FastAPI()
 
+async def cleanup_overlays(page):
+    """Removes annoying popups that block the view or interactions."""
+    await page.evaluate("""() => {
+        const selectors = [
+            '.nb-search-along-metro-popover', '.modal', '.chat-widget-container', 
+            '.tooltip', '.nb-tp-container', '#common-login', '.joyride-step__container'
+        ];
+        selectors.forEach(s => {
+            document.querySelectorAll(s).forEach(el => el.remove());
+        });
+        document.body.classList.remove('modal-open');
+        document.body.style.overflow = 'auto';
+    }""")
+
 @app.get("/")
 async def home():
-    return {"status": "Society-Specific Scraper Active"}
+    return {"status": "Society Search Scraper Ready"}
 
 @app.get("/scrape")
 async def scrape(prop: str, city: str):
@@ -22,60 +36,46 @@ async def scrape(prop: str, city: str):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
                 viewport={'width': 1280, 'height': 800}
             )
-
-            # 1. THE WATCHDOG: This kills popups instantly as they appear
-            await context.add_init_script("""
-                const observer = new MutationObserver(() => {
-                    const selectors = [
-                        '.nb-search-along-metro-popover', '.modal', '.chat-widget-container', 
-                        '.tooltip', '.nb-tp-container', '#common-login', '.joyride-step__container'
-                    ];
-                    selectors.forEach(s => {
-                        document.querySelectorAll(s).forEach(el => el.remove());
-                    });
-                    document.body.classList.remove('modal-open');
-                    document.body.style.overflow = 'auto';
-                });
-                observer.observe(document, { childList: true, subtree: true });
-            """)
-            
             page = await context.new_page()
 
-            # 2. GO TO THE CITY RENT PAGE
-            # This ensures we are on the right search interface immediately
-            await page.goto(f"https://www.nobroker.in/property/rent/{city.lower()}/", wait_until="networkidle", timeout=60000)
+            # 1. GO TO HOME PAGE
+            await page.goto("https://www.nobroker.in/", wait_until="networkidle", timeout=60000)
+            await cleanup_overlays(page)
 
-            # 3. TYPE AND SELECT SOCIETY
-            search_input = "input[placeholder*='Search'], input#listPageSearchLocality"
-            await page.wait_for_selector(search_input)
+            # 2. SELECT RENT TAB
+            await page.click("text=Rent")
+
+            # 3. TYPE SOCIETY NAME
+            search_input = "input#listPageSearchLocality"
             await page.fill(search_input, prop)
-            
-            # Wait for dropdown and select the specific society
-            await asyncio.sleep(2.5) 
+            await asyncio.sleep(2) 
+
+            # 4. SELECT FIRST RESULT FROM DROPDOWN
             await page.keyboard.press("ArrowDown")
             await page.keyboard.press("Enter")
+
+            # 5. CLICK SEARCH
+            await page.click("button.prop-search-button")
+
+            # 6. WAIT FOR LISTINGS TO LOAD
+            try:
+                # We wait for the price symbol (₹) to confirm data is real
+                await page.wait_for_selector("xpath=//*[contains(text(), '₹')]", timeout=20000)
+                print("✅ Listings loaded.")
+            except:
+                print("⚠️ Search taking time, attempting cleanup and capture...")
+
+            # 7. FINAL CLEANUP & SCREENSHOT
+            # We run cleanup again here to catch popups that appear after the search
+            await cleanup_overlays(page)
             
-            # 4. CLICK SEARCH
-            # We use a flexible selector to find the search button
-            try:
-                await page.click("button:has-text('Search'), .prop-search-button", timeout=5000)
-            except:
-                await page.keyboard.press("Enter")
-
-            # 5. WAIT FOR ACTUAL LISTINGS
-            # We wait for the Rupee symbol (₹) to confirm data is fully loaded
-            try:
-                await page.wait_for_selector("xpath=//*[contains(text(), '₹')]", state="visible", timeout=20000)
-                print(f"✅ Listings for {prop} found.")
-            except:
-                print("⚠️ Loading took too long, capturing best available view.")
-
-            # 6. FINAL SETTLE
-            # Scroll slightly to trigger image loading for the screenshot
+            # Trigger lazy-load images by scrolling slightly
             await page.mouse.wheel(0, 300)
             await asyncio.sleep(2)
             
-            # 7. CAPTURE
+            # One last cleanup just in case a popup triggered during the scroll
+            await cleanup_overlays(page)
+            
             screenshot_bytes = await page.screenshot(full_page=False)
             
             await browser.close()
