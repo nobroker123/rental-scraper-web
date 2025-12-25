@@ -11,58 +11,68 @@ async def home():
 
 @app.get("/scrape")
 async def scrape(prop: str, city: str):
+    browser = None
     async with async_playwright() as p:
-        # 1. USE THE STEALTH ENDPOINT
-        raw_url = os.getenv("BROWSER_URL")
-        stealth_url = raw_url.replace("/chromium", "/chromium/stealth") if "/chromium" in raw_url else raw_url
-        
-        browser = await p.chromium.connect_over_cdp(stealth_url)
-        
-        # 2. ADD HUMAN FINGERPRINTS
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 1280, 'height': 800},
-            device_scale_factor=1
-        )
-        
-        page = await context.new_page()
-
         try:
-            # 3. DIRECT SEARCH
+            # 1. CONNECT VIA STEALTH
+            raw_url = os.getenv("BROWSER_URL")
+            stealth_url = raw_url.replace("/chromium", "/chromium/stealth") if "/chromium" in raw_url else raw_url
+            browser = await p.chromium.connect_over_cdp(stealth_url)
+            
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                viewport={'width': 1280, 'height': 800}
+            )
+            page = await context.new_page()
+
+            # 2. TARGET URL
             formatted_prop = prop.replace(" ", "-").lower()
             formatted_city = city.lower()
             target_url = f"https://www.nobroker.in/property/rent/{formatted_city}/{formatted_prop}"
             
-            # Use 'networkidle' to ensure the page is mostly loaded
-            await page.goto(target_url, wait_until="networkidle", timeout=60000)
-            
-            # 4. WAIT FOR CONTENT (Wait for actual property cards to replace gray boxes)
-            # We try to wait for the property card class. If it doesn't find it, it moves on after 10s.
-            try:
-                await page.wait_for_selector(".nb__2_XST", timeout=10000)
-            except:
-                await asyncio.sleep(5) 
+            # Navigate and wait for the initial structure
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
 
-            # 5. CLEAN THE PAGE (Hide popups, chat bots, and tooltips)
+            # 3. TRIGGER DATA LOADING (Scroll Down & Up)
+            # Many sites won't replace "Gray Boxes" until they detect movement
+            await page.mouse.wheel(0, 600)
+            await asyncio.sleep(1)
+            await page.mouse.wheel(0, -600)
+
+            # 4. WAIT FOR REAL DATA
+            # We wait for the Rupee symbol (₹) which only appears when real prices load
+            try:
+                await page.wait_for_selector("xpath=//*[contains(text(), '₹')]", timeout=12000)
+            except:
+                # Backup: wait for the card class you had before
+                await asyncio.sleep(4) 
+
+            # 5. AGGRESSIVE CLEANUP
+            # This hides the Metro popup, the Map tooltip, and the Natasha bot
             await page.evaluate("""() => {
                 const selectors = [
                     '.nb-search-along-metro-popover', 
-                    '.modal-content', 
+                    '.modal-backdrop', 
+                    '.modal', 
                     '#common-login', 
-                    '.p-4.tooltip-inner',
                     '.chat-widget-container',
-                    '#onBoardingStep1',
-                    '.active-tp'
+                    '.tooltip',
+                    '[id*="popover"]',
+                    '.active-tp',
+                    '#onBoardingStep1'
                 ];
                 selectors.forEach(s => {
-                    document.querySelectorAll(s).forEach(el => el.style.display = 'none');
+                    document.querySelectorAll(s).forEach(el => el.remove());
                 });
+                // Unfreeze the page background
+                document.body.classList.remove('modal-open');
+                document.body.style.overflow = 'auto';
             }""")
 
-            # Extra second to let any layout shifts settle
+            # 6. FINAL SETTLE
             await asyncio.sleep(2)
 
-            # 6. TAKE THE SCREENSHOT
+            # 7. CAPTURE
             screenshot_bytes = await page.screenshot(full_page=False)
             
             await browser.close()
