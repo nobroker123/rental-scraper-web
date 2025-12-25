@@ -7,7 +7,7 @@ app = FastAPI()
 
 @app.get("/")
 async def home():
-    return {"status": "Interactive Scraper Ready"}
+    return {"status": "Scraper is ready"}
 
 @app.get("/scrape")
 async def scrape(prop: str, city: str):
@@ -24,41 +24,36 @@ async def scrape(prop: str, city: str):
             )
             page = await context.new_page()
 
-            # 1. GO TO PAGE
+            # 1. URL Generation
             formatted_prop = prop.replace(" ", "-").lower()
             formatted_city = city.lower()
             target_url = f"https://www.nobroker.in/property/rent/{formatted_city}/{formatted_prop}"
             
+            # Go to page and wait for the network to be quiet
             await page.goto(target_url, wait_until="networkidle", timeout=60000)
 
-            # 2. INTERACT WITH POPUPS (The Magic Step)
-            # Instead of just deleting them, we click the 'Skip' button on the Metro popup
-            try:
-                # This 'Skip' button is what triggers the data load in many cases
-                await page.click("text=Skip", timeout=5000)
-            except:
-                pass
+            # 2. FORCE DATA LOAD (The "Human" Scroll)
+            # We scroll down 1000 pixels and wait for the API to respond
+            await page.evaluate("window.scrollTo(0, 1000)")
+            await asyncio.sleep(3)
+            await page.evaluate("window.scrollTo(0, 0)")
 
-            # 3. FORCE A HUMAN SCROLL
-            # We scroll down slowly, then back up
-            await page.mouse.wheel(0, 500)
-            await asyncio.sleep(2)
-            await page.mouse.wheel(0, -500)
-
-            # 4. WAIT FOR ACTUAL LISTING
-            # We wait for the 'Rent' label which only appears when data is real
+            # 3. SMART WAIT: Wait for the Rupee symbol to appear
+            # This ensures the gray boxes have been replaced by real prices
             try:
-                await page.wait_for_selector(".nb__2_XST", timeout=15000)
+                await page.wait_for_selector("text=₹", timeout=15000)
             except:
+                # If Rupee isn't found, wait for any text that isn't part of the skeleton
                 await asyncio.sleep(5)
 
-            # 5. CLEAN THE VIEW (Final sweep to remove remaining boxes)
+            # 4. FINAL CLEANUP (Remove any lingering tooltips)
             await page.evaluate("""() => {
-                const badOnes = ['.nb-search-along-metro-popover', '.modal', '.chat-widget-container', '.tooltip'];
+                const badOnes = ['.nb-search-along-metro-popover', '.modal', '.chat-widget-container', '.tooltip', '.nb-tp-container'];
                 badOnes.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
+                document.body.style.overflow = 'auto';
             }""")
 
-            # 6. CAPTURE
+            # 5. CAPTURE
             await asyncio.sleep(1)
             screenshot_bytes = await page.screenshot(full_page=False)
             
