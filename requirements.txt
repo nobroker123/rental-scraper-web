@@ -2,3 +2,4 @@ fastapi
 uvicorn
 playwright
 python-dotenv
+Pillow==10.2.0
