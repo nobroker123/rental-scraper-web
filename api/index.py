@@ -8,7 +8,7 @@ import io
 app = FastAPI()
 
 async def cleanup_overlays(page):
-    """Aggressively removes popups and backdrops that block listings."""
+    """Aggressively removes popups and backdrops."""
     await page.evaluate("""() => {
         const selectors = [
             '.nb-search-along-metro-popover', '.modal', '.chat-widget-container', 
@@ -16,46 +16,53 @@ async def cleanup_overlays(page):
             '.modal-backdrop', '.p-4.text-center', '.close', '.nearby-locality-container'
         ];
         selectors.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
-        document.body.classList.remove('modal-open');
         document.body.style.overflow = 'auto';
     }""")
 
 async def scrape_site(context, config, prop, city):
-    """Universal search handler with 'Wait-for-Listing' logic."""
     page = await context.new_page()
     try:
-        # 1. Load the site
         await page.goto(config["url"], wait_until="domcontentloaded", timeout=30000)
         await cleanup_overlays(page)
 
-        # 2. Site-specific Search Logic
         if config["name"] == "NoBroker":
             await page.click("text=Rent")
         
-        # Type the property name
-        await page.fill(config["input"], f"{prop} {city}")
-        await asyncio.sleep(2) # Mandatory wait for dropdown suggestions to appear
-
-        # Select the first suggestion and Search
-        await page.keyboard.press("ArrowDown")
-        await page.keyboard.press("Enter")
+        # 1. Type the property name
+        await page.fill(config["input"], prop)
         
-        # Click search button if Enter isn't enough (NoBroker specific)
-        if "btn" in config:
-            try:
-                await page.click(config["btn"], timeout=3000)
-            except:
-                pass
-
-        # 3. THE KEY FIX: Wait for Actual Data to Appear
-        # We wait for a Rupee symbol or a listing card to prove we left the home page
+        # 2. SELECT THE RIGHT SOCIETY FROM DROPDOWN
+        # This waits for the suggestions list to appear
+        suggestion_selector = config.get("suggestion_list", ".suggestion-item")
         try:
-            await page.wait_for_selector(config["wait_for"], timeout=15000)
+            await page.wait_for_selector(suggestion_selector, timeout=5000)
+            # Find all suggestions and click the one that matches our property
+            suggestions = await page.query_selector_all(suggestion_selector)
+            clicked = False
+            for s in suggestions:
+                text = await s.inner_text()
+                if prop.lower() in text.lower():
+                    await s.click()
+                    clicked = True
+                    break
+            
+            if not clicked: # Fallback if no perfect match found
+                await page.keyboard.press("ArrowDown")
+                await page.keyboard.press("Enter")
         except:
-            # Fallback for sites that hide the Rupee symbol in images
+            await page.keyboard.press("Enter")
+
+        # 3. CLICK SEARCH & WAIT FOR DATA
+        if "btn" in config:
+            try: await page.click(config["btn"], timeout=3000)
+            except: pass
+
+        # Wait for the actual listings (Rupee symbol is the best indicator)
+        try:
+            await page.wait_for_selector("text=₹", timeout=10000)
+        except:
             await asyncio.sleep(5) 
 
-        # 4. Final Cleanup & Capture
         await cleanup_overlays(page)
         await page.evaluate("window.scrollTo(0, 0)")
         return await page.screenshot(full_page=False)
@@ -67,7 +74,7 @@ async def scrape_site(context, config, prop, city):
         await page.close()
 
 @app.get("/scrape")
-async def scrape_all(prop: str, city: str):
+async def scrape(prop: str, city: str):
     browser = None
     async with async_playwright() as p:
         try:
@@ -76,40 +83,30 @@ async def scrape_all(prop: str, city: str):
             browser = await p.chromium.connect_over_cdp(stealth_url)
             context = await browser.new_context(viewport={'width': 1280, 'height': 800})
 
-            # Configuration for the target sites
+            # Configuration for the sites
             configs = [
                 {
                     "name": "NoBroker", 
                     "url": "https://www.nobroker.in/", 
                     "input": "input#listPageSearchLocality", 
                     "btn": "button.prop-search-button",
-                    "wait_for": "xpath=//*[contains(text(), '₹')]"
-                },
-                {
-                    "name": "Housing", 
-                    "url": "https://housing.com/", 
-                    "input": ".search-box input", 
-                    "wait_for": "text=Rent"
+                    "suggestion_list": ".autocomplete-dropdown .suggestion" 
                 },
                 {
                     "name": "MagicBricks", 
                     "url": "https://www.magicbricks.com/", 
                     "input": "input#keyword", 
-                    "wait_for": ".mb-srp__card"
+                    "suggestion_list": ".mb-search__auto-suggest__item"
                 }
             ]
 
-            # Run all searches simultaneously to save time
             tasks = [scrape_site(context, cfg, prop, city) for cfg in configs]
             screenshots = await asyncio.gather(*tasks)
             
-            # Stitch the valid screenshots together
             valid_images = [Image.open(io.BytesIO(s)) for s in screenshots if s is not None]
-            
             if not valid_images:
-                return {"error": "All sites failed or timed out. Try a more specific property name."}
+                return {"error": "No data found for this society."}
 
-            # Combine images vertically
             total_height = sum(img.height for img in valid_images)
             combined = Image.new('RGB', (1280, total_height))
             y = 0
@@ -117,12 +114,8 @@ async def scrape_all(prop: str, city: str):
                 combined.paste(img, (0, y))
                 y += img.height
 
-            img_bytes = io.BytesIO()
-            combined.save(img_bytes, format='PNG')
-            return Response(content=img_bytes.getvalue(), media_type="image/png")
-
-        except Exception as e:
-            return {"error": str(e)}
+            output = io.BytesIO()
+            combined.save(output, format='PNG')
+            return Response(content=output.getvalue(), media_type="image/png")
         finally:
-            if browser and browser.is_connected():
-                await browser.close()
+            if browser: await browser.close()
