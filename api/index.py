@@ -5,6 +5,21 @@ import asyncio
 
 app = FastAPI()
 
+async def cleanup_page(page):
+    """Function to physically delete annoying overlays and unfreeze the page."""
+    await page.evaluate("""() => {
+        const selectors = [
+            '.nb-search-along-metro-popover', '.modal-backdrop', '.modal', 
+            '#common-login', '.chat-widget-container', '.tooltip', 
+            '[id*="popover"]', '.active-tp', '#onBoardingStep1', '.joyride-step__container'
+        ];
+        selectors.forEach(s => {
+            document.querySelectorAll(s).forEach(el => el.remove());
+        });
+        document.body.classList.remove('modal-open');
+        document.body.style.overflow = 'auto';
+    }""")
+
 @app.get("/")
 async def home():
     return {"status": "Scraper is ready", "url": "rental-scraper-web-nobroker.vercel.app"}
@@ -14,7 +29,6 @@ async def scrape(prop: str, city: str):
     browser = None
     async with async_playwright() as p:
         try:
-            # 1. CONNECT VIA STEALTH
             raw_url = os.getenv("BROWSER_URL")
             stealth_url = raw_url.replace("/chromium", "/chromium/stealth") if "/chromium" in raw_url else raw_url
             browser = await p.chromium.connect_over_cdp(stealth_url)
@@ -25,54 +39,37 @@ async def scrape(prop: str, city: str):
             )
             page = await context.new_page()
 
-            # 2. TARGET URL
+            # 1. FORMAT AND GO
             formatted_prop = prop.replace(" ", "-").lower()
             formatted_city = city.lower()
             target_url = f"https://www.nobroker.in/property/rent/{formatted_city}/{formatted_prop}"
             
-            # Start loading
             await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
 
-            # 3. TRIGGER DATA (The Scroll-Shake)
-            # This tricks the site into thinking a human is browsing, which loads the real cards
-            await page.mouse.wheel(0, 800)
-            await asyncio.sleep(2)
-            await page.mouse.wheel(0, -800)
+            # 2. FIRST CLEANUP (Kill initial popups)
+            await cleanup_page(page)
 
-            # 4. WAIT FOR DATA TO REPLACE GRAY BOXES
-            # We wait for the Rupee symbol (₹) to appear in the code
+            # 3. TRIGGER DATA (Deep Scroll)
+            # We scroll down significantly to trigger the lazy-load of actual cards
+            await page.evaluate("window.scrollTo(0, 1000)")
+            await asyncio.sleep(2)
+            await page.evaluate("window.scrollTo(0, 0)")
+
+            # 4. WAIT FOR DATA
             try:
-                await page.wait_for_selector("xpath=//*[contains(text(), '₹')]", timeout=15000)
+                # We wait for the specific listing card ID or class
+                await page.wait_for_selector(".nb__2_XST", timeout=10000)
             except:
-                print("Rupee symbol not found, waiting a few more seconds...")
+                # Fallback: Wait for prices
                 await asyncio.sleep(5)
 
-            # 5. THE CLEANUP (Removing those specific popups from your screenshot)
-            await page.evaluate("""() => {
-                const selectors = [
-                    '.nb-search-along-metro-popover', // The 'Search along Metro' box
-                    '.modal-backdrop',                // The dark background
-                    '.modal',                         // Any open windows
-                    '#common-login',                  // Login popup
-                    '.chat-widget-container',         // Natasha Bot
-                    '.tooltip',                       // Any 'Got it' tooltips
-                    '[id*="popover"]',                // MAP feature popover
-                    '.active-tp',                     // Other tooltips
-                    '#onBoardingStep1'                // Tutorial step 1
-                ];
-                selectors.forEach(s => {
-                    document.querySelectorAll(s).forEach(el => el.remove());
-                });
-                
-                // Fix the scroll if a modal was blocking it
-                document.body.classList.remove('modal-open');
-                document.body.style.overflow = 'auto';
-            }""")
-
-            # 6. FINAL SETTLE
+            # 5. SECOND CLEANUP (Kill popups that triggered during scroll)
+            await cleanup_page(page)
+            
+            # Final settle
             await asyncio.sleep(2)
 
-            # 7. CAPTURE
+            # 6. CAPTURE
             screenshot_bytes = await page.screenshot(full_page=False)
             
             await browser.close()
