@@ -7,7 +7,7 @@ app = FastAPI()
 
 @app.get("/")
 async def home():
-    return {"status": "Scraper is ready"}
+    return {"status": "Retry-Enabled Scraper Ready"}
 
 @app.get("/scrape")
 async def scrape(prop: str, city: str):
@@ -24,36 +24,39 @@ async def scrape(prop: str, city: str):
             )
             page = await context.new_page()
 
-            # 1. URL Generation
             formatted_prop = prop.replace(" ", "-").lower()
             formatted_city = city.lower()
             target_url = f"https://www.nobroker.in/property/rent/{formatted_city}/{formatted_prop}"
-            
-            # Go to page and wait for the network to be quiet
-            await page.goto(target_url, wait_until="networkidle", timeout=60000)
 
-            # 2. FORCE DATA LOAD (The "Human" Scroll)
-            # We scroll down 1000 pixels and wait for the API to respond
-            await page.evaluate("window.scrollTo(0, 1000)")
-            await asyncio.sleep(3)
-            await page.evaluate("window.scrollTo(0, 0)")
+            # --- RETRY LOOP START ---
+            max_attempts = 2
+            data_loaded = False
 
-            # 3. SMART WAIT: Wait for the Rupee symbol to appear
-            # This ensures the gray boxes have been replaced by real prices
-            try:
-                await page.wait_for_selector("text=₹", timeout=15000)
-            except:
-                # If Rupee isn't found, wait for any text that isn't part of the skeleton
-                await asyncio.sleep(5)
+            for attempt in range(max_attempts):
+                print(f"Attempt {attempt + 1}: Loading {target_url}")
+                await page.goto(target_url, wait_until="networkidle", timeout=60000)
 
-            # 4. FINAL CLEANUP (Remove any lingering tooltips)
+                # Trigger lazy loading
+                await page.evaluate("window.scrollTo(0, 800)")
+                await asyncio.sleep(4) 
+                
+                # Check for the Rupee symbol (the sign of real data)
+                try:
+                    await page.wait_for_selector("text=₹", timeout=8000)
+                    data_loaded = True
+                    print("✅ Real data detected!")
+                    break 
+                except:
+                    print("❌ Skeleton detected, retrying...")
+                    continue 
+
+            # --- CLEANUP & CAPTURE ---
             await page.evaluate("""() => {
                 const badOnes = ['.nb-search-along-metro-popover', '.modal', '.chat-widget-container', '.tooltip', '.nb-tp-container'];
                 badOnes.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
                 document.body.style.overflow = 'auto';
             }""")
 
-            # 5. CAPTURE
             await asyncio.sleep(1)
             screenshot_bytes = await page.screenshot(full_page=False)
             
