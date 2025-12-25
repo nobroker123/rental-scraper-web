@@ -1,5 +1,5 @@
 fastapi
-uvicorn
 playwright
+playwright-stealth
+Pillow
 python-dotenv
-Pillow==10.2.0
