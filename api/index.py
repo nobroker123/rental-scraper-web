@@ -6,15 +6,18 @@ import asyncio
 app = FastAPI()
 
 async def cleanup_page(page):
-    """Function to physically delete annoying overlays and unfreeze the page."""
     await page.evaluate("""() => {
         const selectors = [
             '.nb-search-along-metro-popover', '.modal-backdrop', '.modal', 
             '#common-login', '.chat-widget-container', '.tooltip', 
-            '[id*="popover"]', '.active-tp', '#onBoardingStep1', '.joyride-step__container'
+            '[id*="popover"]', '.active-tp', '#onBoardingStep1', 
+            '.joyride-step__container', '.nb-tp-container'
         ];
         selectors.forEach(s => {
-            document.querySelectorAll(s).forEach(el => el.remove());
+            document.querySelectorAll(s).forEach(el => {
+                el.style.display = 'none';
+                el.remove();
+            });
         });
         document.body.classList.remove('modal-open');
         document.body.style.overflow = 'auto';
@@ -22,7 +25,7 @@ async def cleanup_page(page):
 
 @app.get("/")
 async def home():
-    return {"status": "Scraper is ready", "url": "rental-scraper-web-nobroker.vercel.app"}
+    return {"status": "Scraper is ready"}
 
 @app.get("/scrape")
 async def scrape(prop: str, city: str):
@@ -34,39 +37,37 @@ async def scrape(prop: str, city: str):
             browser = await p.chromium.connect_over_cdp(stealth_url)
             
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
                 viewport={'width': 1280, 'height': 800}
             )
             page = await context.new_page()
 
-            # 1. FORMAT AND GO
+            # 1. GENERATE URL
             formatted_prop = prop.replace(" ", "-").lower()
             formatted_city = city.lower()
             target_url = f"https://www.nobroker.in/property/rent/{formatted_city}/{formatted_prop}"
             
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+            # Go to page
+            await page.goto(target_url, wait_until="networkidle", timeout=60000)
 
-            # 2. FIRST CLEANUP (Kill initial popups)
-            await cleanup_page(page)
-
-            # 3. TRIGGER DATA (Deep Scroll)
-            # We scroll down significantly to trigger the lazy-load of actual cards
-            await page.evaluate("window.scrollTo(0, 1000)")
-            await asyncio.sleep(2)
-            await page.evaluate("window.scrollTo(0, 0)")
-
-            # 4. WAIT FOR DATA
+            # 2. WAIT FOR SKELETON TO DISAPPEAR
+            # This is the most important part. We wait until the gray box class is GONE.
             try:
-                # We wait for the specific listing card ID or class
-                await page.wait_for_selector(".nb__2_XST", timeout=10000)
+                # Wait for the property title to appear (meaning data is loaded)
+                await page.wait_for_selector("h2.heading-6", timeout=15000)
             except:
-                # Fallback: Wait for prices
-                await asyncio.sleep(5)
+                # Fallback: wait for the loading shimmer to disappear from the DOM
+                await page.wait_for_function('() => !document.querySelector(".shimmer-container")', timeout=10000)
 
-            # 5. SECOND CLEANUP (Kill popups that triggered during scroll)
+            # 3. INTERACT TO TRIGGER RENDER
+            # We scroll a little and wait
+            await page.mouse.wheel(0, 400)
+            await asyncio.sleep(3) 
+
+            # 4. RUN CLEANUP
             await cleanup_page(page)
             
-            # Final settle
+            # 5. FINAL SETTLE FOR IMAGES
             await asyncio.sleep(2)
 
             # 6. CAPTURE
@@ -76,6 +77,5 @@ async def scrape(prop: str, city: str):
             return Response(content=screenshot_bytes, media_type="image/png")
 
         except Exception as e:
-            if browser:
-                await browser.close()
+            if browser: await browser.close()
             return {"error": str(e)}
