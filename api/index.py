@@ -2,108 +2,95 @@ from fastapi import FastAPI, Response
 from playwright.async_api import async_playwright
 import os
 import asyncio
+from PIL import Image
+import io
 
 app = FastAPI()
 
-# Site configurations with their specific selectors
-SITES = {
-    "nobroker": {
-        "url": "https://www.nobroker.in/",
-        "search": "input#listPageSearchLocality",
-        "verify": "xpath=//*[contains(text(), '₹')]"
-    },
-    "housing": {
-        "url": "https://housing.com/",
-        "search": ".search-box input", 
-        "verify": "text=Rent"
-    },
-    "magicbricks": {
-        "url": "https://www.magicbricks.com/",
-        "search": "#keyword",
-        "verify": ".mb-srp__card"
-    },
-    "makaan": {
-        "url": "https://www.makaan.com/",
-        "search": ".typeahead",
-        "verify": ".listing-card"
-    },
-    "99acres": {
-        "url": "https://www.99acres.com/",
-        "search": "#keyword",
-        "verify": ".pageComponent"
-    }
-}
-
-async def clean_page(page):
-    """Universal popup killer for all real estate sites."""
+async def cleanup_overlays(page):
+    """Removes popups and overlays that block the data."""
     await page.evaluate("""() => {
-        const popups = [
-            '.modal', '.nb-search-along-metro-popover', '.chat-widget-container', 
+        const selectors = [
+            '.nb-search-along-metro-popover', '.modal', '.chat-widget-container', 
             '.tooltip', '.nb-tp-container', '#common-login', '.joyride-step__container',
-            '.cross-icon', '.close-btn', '.p-4.text-center'
+            '.modal-backdrop', '.p-4.text-center', '.close', '.nearby-locality-container'
         ];
-        popups.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
+        selectors.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
         document.body.style.overflow = 'auto';
     }""")
 
 @app.get("/scrape")
 async def scrape_all(prop: str, city: str):
     browser = None
-    results = {}
+    all_screenshots = []
     
     async with async_playwright() as p:
         try:
             raw_url = os.getenv("BROWSER_URL")
             stealth_url = raw_url.replace("/chromium", "/chromium/stealth") if "/chromium" in raw_url else raw_url
             browser = await p.chromium.connect_over_cdp(stealth_url)
-            context = await browser.new_context(viewport={'width': 1280, 'height': 900})
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+                viewport={'width': 1280, 'height': 900}
+            )
 
-            # We loop through each site automatically
-            for name, config in SITES.items():
-                print(f"Searching {name} for {prop}...")
-                page = await context.new_page()
-                
+            # Define the sites and their specific search bar IDs
+            targets = [
+                {"name": "NoBroker", "url": "https://www.nobroker.in/", "input": "input#listPageSearchLocality", "btn": "button.prop-search-button"},
+                {"name": "Housing", "url": "https://housing.com/", "input": "input.search-box", "btn": "button.search-btn"},
+                {"name": "MagicBricks", "url": "https://www.magicbricks.com/", "input": "input#keyword", "btn": "button.search-button"}
+            ]
+
+            for site in targets:
                 try:
-                    # 1. Load Home
-                    await page.goto(config["url"], wait_until="networkidle", timeout=45000)
-                    await clean_page(page)
-
-                    # 2. Perform Search
-                    await page.wait_for_selector(config["search"], timeout=10000)
-                    await page.fill(config["search"], f"{prop} {city}")
+                    page = await context.new_page()
+                    # 1. SEARCH PROCESS
+                    await page.goto(site["url"], wait_until="networkidle", timeout=45000)
+                    await cleanup_overlays(page)
+                    
+                    if site["name"] == "NoBroker":
+                        await page.click("text=Rent")
+                    
+                    await page.fill(site["input"], f"{prop} {city}")
                     await asyncio.sleep(2)
                     await page.keyboard.press("ArrowDown")
                     await page.keyboard.press("Enter")
                     
-                    # 3. Handle specific site search buttons if Enter isn't enough
-                    if name == "nobroker":
-                        await page.click("button.prop-search-button")
-
-                    # 4. Wait for real data
                     try:
-                        await page.wait_for_selector(config["verify"], timeout=15000)
+                        await page.click(site["btn"], timeout=5000)
                     except:
                         pass
-                    
-                    # 5. Cleanup and Scroll
-                    await clean_page(page)
+
+                    # 2. WAIT FOR RESULTS (Looking for Rupee symbol or price indicators)
+                    await asyncio.sleep(5) 
+                    await cleanup_overlays(page)
                     await page.evaluate("window.scrollTo(0, 0)")
                     
-                    # 6. Save screenshot (Only NoBroker returned to browser, others logged)
+                    # 3. CAPTURE
                     shot = await page.screenshot(full_page=False)
-                    results[name] = shot
-                    print(f"✅ {name} captured successfully.")
-                    
-                except Exception as site_error:
-                    print(f"❌ Failed to scrape {name}: {str(site_error)}")
-                
-                await page.close()
+                    all_screenshots.append(Image.open(io.BytesIO(shot)))
+                    await page.close()
+                except Exception as e:
+                    print(f"Skipping {site['name']} due to error: {e}")
 
-            # For now, we return the NoBroker shot as the primary response
-            if "nobroker" in results:
-                return Response(content=results["nobroker"], media_type="image/png")
+            await browser.close()
+
+            # STITCH IMAGES TOGETHER
+            if not all_screenshots:
+                return {"error": "No screenshots captured"}
             
-            return {"status": "All sites processed", "sites_captured": list(results.keys())}
+            total_height = sum(img.height for img in all_screenshots)
+            max_width = max(img.width for img in all_screenshots)
+            combined_image = Image.new('RGB', (max_width, total_height))
+            
+            y_offset = 0
+            for img in all_screenshots:
+                combined_image.paste(img, (0, y_offset))
+                y_offset += img.height
+
+            img_byte_arr = io.BytesIO()
+            combined_image.save(img_byte_arr, format='PNG')
+            return Response(content=img_byte_arr.getvalue(), media_type="image/png")
 
         except Exception as e:
             if browser: await browser.close()
