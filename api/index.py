@@ -30,41 +30,41 @@ async def scrape(prop: str, city: str):
             formatted_city = city.lower()
             target_url = f"https://www.nobroker.in/property/rent/{formatted_city}/{formatted_prop}"
             
-            # Navigate and wait for the initial structure
+            # Start loading
             await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
 
-            # 3. TRIGGER DATA LOADING (Scroll Down & Up)
-            # Many sites won't replace "Gray Boxes" until they detect movement
-            await page.mouse.wheel(0, 600)
-            await asyncio.sleep(1)
-            await page.mouse.wheel(0, -600)
+            # 3. TRIGGER DATA (The Scroll-Shake)
+            # This tricks the site into thinking a human is browsing, which loads the real cards
+            await page.mouse.wheel(0, 800)
+            await asyncio.sleep(2)
+            await page.mouse.wheel(0, -800)
 
-            # 4. WAIT FOR REAL DATA
-            # We wait for the Rupee symbol (₹) which only appears when real prices load
+            # 4. WAIT FOR DATA TO REPLACE GRAY BOXES
+            # We wait for the Rupee symbol (₹) to appear in the code
             try:
-                await page.wait_for_selector("xpath=//*[contains(text(), '₹')]", timeout=12000)
+                await page.wait_for_selector("xpath=//*[contains(text(), '₹')]", timeout=15000)
             except:
-                # Backup: wait for the card class you had before
-                await asyncio.sleep(4) 
+                print("Rupee symbol not found, waiting a few more seconds...")
+                await asyncio.sleep(5)
 
-            # 5. AGGRESSIVE CLEANUP
-            # This hides the Metro popup, the Map tooltip, and the Natasha bot
+            # 5. THE CLEANUP (Removing those specific popups from your screenshot)
             await page.evaluate("""() => {
                 const selectors = [
-                    '.nb-search-along-metro-popover', 
-                    '.modal-backdrop', 
-                    '.modal', 
-                    '#common-login', 
-                    '.chat-widget-container',
-                    '.tooltip',
-                    '[id*="popover"]',
-                    '.active-tp',
-                    '#onBoardingStep1'
+                    '.nb-search-along-metro-popover', // The 'Search along Metro' box
+                    '.modal-backdrop',                // The dark background
+                    '.modal',                         // Any open windows
+                    '#common-login',                  // Login popup
+                    '.chat-widget-container',         // Natasha Bot
+                    '.tooltip',                       // Any 'Got it' tooltips
+                    '[id*="popover"]',                // MAP feature popover
+                    '.active-tp',                     // Other tooltips
+                    '#onBoardingStep1'                // Tutorial step 1
                 ];
                 selectors.forEach(s => {
                     document.querySelectorAll(s).forEach(el => el.remove());
                 });
-                // Unfreeze the page background
+                
+                // Fix the scroll if a modal was blocking it
                 document.body.classList.remove('modal-open');
                 document.body.style.overflow = 'auto';
             }""")
