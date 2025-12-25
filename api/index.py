@@ -5,27 +5,9 @@ import asyncio
 
 app = FastAPI()
 
-async def cleanup_page(page):
-    await page.evaluate("""() => {
-        const selectors = [
-            '.nb-search-along-metro-popover', '.modal-backdrop', '.modal', 
-            '#common-login', '.chat-widget-container', '.tooltip', 
-            '[id*="popover"]', '.active-tp', '#onBoardingStep1', 
-            '.joyride-step__container', '.nb-tp-container'
-        ];
-        selectors.forEach(s => {
-            document.querySelectorAll(s).forEach(el => {
-                el.style.display = 'none';
-                el.remove();
-            });
-        });
-        document.body.classList.remove('modal-open');
-        document.body.style.overflow = 'auto';
-    }""")
-
 @app.get("/")
 async def home():
-    return {"status": "Scraper is ready"}
+    return {"status": "Interactive Scraper Ready"}
 
 @app.get("/scrape")
 async def scrape(prop: str, city: str):
@@ -42,35 +24,42 @@ async def scrape(prop: str, city: str):
             )
             page = await context.new_page()
 
-            # 1. GENERATE URL
+            # 1. GO TO PAGE
             formatted_prop = prop.replace(" ", "-").lower()
             formatted_city = city.lower()
             target_url = f"https://www.nobroker.in/property/rent/{formatted_city}/{formatted_prop}"
             
-            # Go to page
             await page.goto(target_url, wait_until="networkidle", timeout=60000)
 
-            # 2. WAIT FOR SKELETON TO DISAPPEAR
-            # This is the most important part. We wait until the gray box class is GONE.
+            # 2. INTERACT WITH POPUPS (The Magic Step)
+            # Instead of just deleting them, we click the 'Skip' button on the Metro popup
             try:
-                # Wait for the property title to appear (meaning data is loaded)
-                await page.wait_for_selector("h2.heading-6", timeout=15000)
+                # This 'Skip' button is what triggers the data load in many cases
+                await page.click("text=Skip", timeout=5000)
             except:
-                # Fallback: wait for the loading shimmer to disappear from the DOM
-                await page.wait_for_function('() => !document.querySelector(".shimmer-container")', timeout=10000)
+                pass
 
-            # 3. INTERACT TO TRIGGER RENDER
-            # We scroll a little and wait
-            await page.mouse.wheel(0, 400)
-            await asyncio.sleep(3) 
-
-            # 4. RUN CLEANUP
-            await cleanup_page(page)
-            
-            # 5. FINAL SETTLE FOR IMAGES
+            # 3. FORCE A HUMAN SCROLL
+            # We scroll down slowly, then back up
+            await page.mouse.wheel(0, 500)
             await asyncio.sleep(2)
+            await page.mouse.wheel(0, -500)
+
+            # 4. WAIT FOR ACTUAL LISTING
+            # We wait for the 'Rent' label which only appears when data is real
+            try:
+                await page.wait_for_selector(".nb__2_XST", timeout=15000)
+            except:
+                await asyncio.sleep(5)
+
+            # 5. CLEAN THE VIEW (Final sweep to remove remaining boxes)
+            await page.evaluate("""() => {
+                const badOnes = ['.nb-search-along-metro-popover', '.modal', '.chat-widget-container', '.tooltip'];
+                badOnes.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
+            }""")
 
             # 6. CAPTURE
+            await asyncio.sleep(1)
             screenshot_bytes = await page.screenshot(full_page=False)
             
             await browser.close()
