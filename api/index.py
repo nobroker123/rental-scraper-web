@@ -5,44 +5,51 @@ import asyncio
 
 app = FastAPI()
 
-# Site-specific selectors to handle different layouts
-SITE_CONFIG = {
+# Site configurations with their specific selectors
+SITES = {
     "nobroker": {
         "url": "https://www.nobroker.in/",
-        "search_input": "input#listPageSearchLocality",
-        "btn": "button.prop-search-button",
-        "wait_for": "xpath=//*[contains(text(), '₹')]"
-    },
-    "magicbricks": {
-        "url": "https://www.magicbricks.com/",
-        "search_input": "input#keyword",
-        "btn": ".search-button",
-        "wait_for": ".mb-srp__card"
+        "search": "input#listPageSearchLocality",
+        "verify": "xpath=//*[contains(text(), '₹')]"
     },
     "housing": {
         "url": "https://housing.com/",
-        "search_input": "input.search-box",
-        "btn": "button.search-btn",
-        "wait_for": "article.card"
+        "search": ".search-box input", 
+        "verify": "text=Rent"
+    },
+    "magicbricks": {
+        "url": "https://www.magicbricks.com/",
+        "search": "#keyword",
+        "verify": ".mb-srp__card"
+    },
+    "makaan": {
+        "url": "https://www.makaan.com/",
+        "search": ".typeahead",
+        "verify": ".listing-card"
+    },
+    "99acres": {
+        "url": "https://www.99acres.com/",
+        "search": "#keyword",
+        "verify": ".pageComponent"
     }
-    # Note: 99acres and Makaan often require specialized headers to avoid blocks
 }
 
-async def cleanup_overlays(page):
-    """Kills popups on all sites to ensure data is visible."""
+async def clean_page(page):
+    """Universal popup killer for all real estate sites."""
     await page.evaluate("""() => {
-        const selectors = ['.modal', '.popup', '.tooltip', '.nb-tp-container', '.banner-container', '#common-login'];
-        selectors.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
+        const popups = [
+            '.modal', '.nb-search-along-metro-popover', '.chat-widget-container', 
+            '.tooltip', '.nb-tp-container', '#common-login', '.joyride-step__container',
+            '.cross-icon', '.close-btn', '.p-4.text-center'
+        ];
+        popups.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
         document.body.style.overflow = 'auto';
     }""")
 
 @app.get("/scrape")
-async def scrape(site: str, prop: str, city: str):
+async def scrape_all(prop: str, city: str):
     browser = None
-    if site.lower() not in SITE_CONFIG:
-        return {"error": f"Site {site} not supported yet."}
-    
-    config = SITE_CONFIG[site.lower()]
+    results = {}
     
     async with async_playwright() as p:
         try:
@@ -50,39 +57,53 @@ async def scrape(site: str, prop: str, city: str):
             stealth_url = raw_url.replace("/chromium", "/chromium/stealth") if "/chromium" in raw_url else raw_url
             browser = await p.chromium.connect_over_cdp(stealth_url)
             context = await browser.new_context(viewport={'width': 1280, 'height': 900})
-            page = await context.new_page()
 
-            # 1. NAVIGATE
-            await page.goto(config["url"], wait_until="networkidle", timeout=60000)
-            await cleanup_overlays(page)
+            # We loop through each site automatically
+            for name, config in SITES.items():
+                print(f"Searching {name} for {prop}...")
+                page = await context.new_page()
+                
+                try:
+                    # 1. Load Home
+                    await page.goto(config["url"], wait_until="networkidle", timeout=45000)
+                    await clean_page(page)
 
-            # 2. PERFORM SEARCH
-            await page.fill(config["search_input"], f"{prop} {city}")
-            await asyncio.sleep(2)
-            await page.keyboard.press("ArrowDown")
-            await page.keyboard.press("Enter")
+                    # 2. Perform Search
+                    await page.wait_for_selector(config["search"], timeout=10000)
+                    await page.fill(config["search"], f"{prop} {city}")
+                    await asyncio.sleep(2)
+                    await page.keyboard.press("ArrowDown")
+                    await page.keyboard.press("Enter")
+                    
+                    # 3. Handle specific site search buttons if Enter isn't enough
+                    if name == "nobroker":
+                        await page.click("button.prop-search-button")
+
+                    # 4. Wait for real data
+                    try:
+                        await page.wait_for_selector(config["verify"], timeout=15000)
+                    except:
+                        pass
+                    
+                    # 5. Cleanup and Scroll
+                    await clean_page(page)
+                    await page.evaluate("window.scrollTo(0, 0)")
+                    
+                    # 6. Save screenshot (Only NoBroker returned to browser, others logged)
+                    shot = await page.screenshot(full_page=False)
+                    results[name] = shot
+                    print(f"✅ {name} captured successfully.")
+                    
+                except Exception as site_error:
+                    print(f"❌ Failed to scrape {name}: {str(site_error)}")
+                
+                await page.close()
+
+            # For now, we return the NoBroker shot as the primary response
+            if "nobroker" in results:
+                return Response(content=results["nobroker"], media_type="image/png")
             
-            # Try clicking the search button if Enter didn't trigger it
-            try:
-                await page.click(config["btn"], timeout=5000)
-            except:
-                pass
-
-            # 3. WAIT FOR RESULTS
-            try:
-                await page.wait_for_selector(config["wait_for"], timeout=20000)
-            except:
-                pass
-
-            # 4. VIEWPORT STABILIZATION
-            await cleanup_overlays(page)
-            await page.evaluate("window.scrollTo(0, 0)") # Ensure we see the top listing
-            await asyncio.sleep(2)
-
-            # 5. CAPTURE
-            screenshot_bytes = await page.screenshot(full_page=False)
-            await browser.close()
-            return Response(content=screenshot_bytes, media_type="image/png")
+            return {"status": "All sites processed", "sites_captured": list(results.keys())}
 
         except Exception as e:
             if browser: await browser.close()
