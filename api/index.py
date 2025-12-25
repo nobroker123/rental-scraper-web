@@ -5,76 +5,82 @@ import asyncio
 
 app = FastAPI()
 
+# Site-specific selectors to handle different layouts
+SITE_CONFIG = {
+    "nobroker": {
+        "url": "https://www.nobroker.in/",
+        "search_input": "input#listPageSearchLocality",
+        "btn": "button.prop-search-button",
+        "wait_for": "xpath=//*[contains(text(), '₹')]"
+    },
+    "magicbricks": {
+        "url": "https://www.magicbricks.com/",
+        "search_input": "input#keyword",
+        "btn": ".search-button",
+        "wait_for": ".mb-srp__card"
+    },
+    "housing": {
+        "url": "https://housing.com/",
+        "search_input": "input.search-box",
+        "btn": "button.search-btn",
+        "wait_for": "article.card"
+    }
+    # Note: 99acres and Makaan often require specialized headers to avoid blocks
+}
+
 async def cleanup_overlays(page):
-    """Physically removes popups so they don't block the data."""
+    """Kills popups on all sites to ensure data is visible."""
     await page.evaluate("""() => {
-        const selectors = [
-            '.nb-search-along-metro-popover', '.modal', '.chat-widget-container', 
-            '.tooltip', '.nb-tp-container', '#common-login', '.joyride-step__container',
-            '.modal-backdrop', '.p-4.text-center'
-        ];
-        selectors.forEach(s => {
-            document.querySelectorAll(s).forEach(el => el.remove());
-        });
-        document.body.classList.remove('modal-open');
+        const selectors = ['.modal', '.popup', '.tooltip', '.nb-tp-container', '.banner-container', '#common-login'];
+        selectors.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
         document.body.style.overflow = 'auto';
     }""")
 
-@app.get("/")
-async def home():
-    return {"status": "Society Search Scraper Ready"}
-
 @app.get("/scrape")
-async def scrape(prop: str, city: str):
+async def scrape(site: str, prop: str, city: str):
     browser = None
+    if site.lower() not in SITE_CONFIG:
+        return {"error": f"Site {site} not supported yet."}
+    
+    config = SITE_CONFIG[site.lower()]
+    
     async with async_playwright() as p:
         try:
             raw_url = os.getenv("BROWSER_URL")
             stealth_url = raw_url.replace("/chromium", "/chromium/stealth") if "/chromium" in raw_url else raw_url
             browser = await p.chromium.connect_over_cdp(stealth_url)
-            
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-                viewport={'width': 1280, 'height': 900} # Increased height slightly to see more
-            )
+            context = await browser.new_context(viewport={'width': 1280, 'height': 900})
             page = await context.new_page()
 
-            # 1. SEARCH PROCESS
-            await page.goto("https://www.nobroker.in/", wait_until="networkidle", timeout=60000)
+            # 1. NAVIGATE
+            await page.goto(config["url"], wait_until="networkidle", timeout=60000)
             await cleanup_overlays(page)
-            await page.click("text=Rent")
-            
-            search_input = "input#listPageSearchLocality"
-            await page.fill(search_input, prop)
-            await asyncio.sleep(2) 
 
-            # 2. SELECT AND SEARCH
+            # 2. PERFORM SEARCH
+            await page.fill(config["search_input"], f"{prop} {city}")
+            await asyncio.sleep(2)
             await page.keyboard.press("ArrowDown")
             await page.keyboard.press("Enter")
-            await page.click("button.prop-search-button")
-
-            # 3. WAIT FOR REAL DATA
+            
+            # Try clicking the search button if Enter didn't trigger it
             try:
-                await page.wait_for_selector("xpath=//*[contains(text(), '₹')]", timeout=20000)
+                await page.click(config["btn"], timeout=5000)
             except:
                 pass
 
-            # 4. THE FIX: CLEAN AND RESET VIEW
-            # Kill the popups first
+            # 3. WAIT FOR RESULTS
+            try:
+                await page.wait_for_selector(config["wait_for"], timeout=20000)
+            except:
+                pass
+
+            # 4. VIEWPORT STABILIZATION
             await cleanup_overlays(page)
-            
-            # Scroll down to load images, then scroll back to EXACT TOP
-            await page.evaluate("window.scrollTo(0, 400)")
+            await page.evaluate("window.scrollTo(0, 0)") # Ensure we see the top listing
             await asyncio.sleep(2)
-            await page.evaluate("window.scrollTo(0, 0)") # Reset to top of page
-            
-            # Final cleanup just in case
-            await cleanup_overlays(page)
-            await asyncio.sleep(1)
 
             # 5. CAPTURE
             screenshot_bytes = await page.screenshot(full_page=False)
-            
             await browser.close()
             return Response(content=screenshot_bytes, media_type="image/png")
 
