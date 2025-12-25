@@ -8,34 +8,43 @@ import io
 app = FastAPI()
 
 async def cleanup_overlays(page):
-    """Removes popups so they don't block the listing data."""
+    """Aggressively removes popups that block visibility."""
     await page.evaluate("""() => {
-        const selectors = ['.nb-search-along-metro-popover', '.modal', '.chat-widget-container', '.tooltip', '.nb-tp-container', '#common-login'];
-        selectors.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
+        const selectors = [
+            '.nb-search-along-metro-popover', '.modal', '.chat-widget-container', 
+            '.tooltip', '.nb-tp-container', '#common-login', '.joyride-step__container',
+            '.modal-backdrop', '.p-4.text-center'
+        ];
+        selectors.forEach(s => {
+            document.querySelectorAll(s).forEach(el => el.remove());
+        });
         document.body.style.overflow = 'auto';
     }""")
 
-async def scrape_site(context, site_config, prop, city):
-    """Individual task to scrape a specific site."""
+async def scrape_single_site(context, name, url, selector, prop, city):
+    """Helper to process each site individually within the same context."""
     page = await context.new_page()
     try:
-        await page.goto(site_config["url"], wait_until="commit", timeout=15000)
+        # Load the page quickly
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
         await cleanup_overlays(page)
         
-        # Site-specific search logic
-        search_input = site_config["input"]
-        await page.fill(search_input, f"{prop} {city}")
-        await asyncio.sleep(1)
+        # Site-specific Search Logic
+        if name == "NoBroker":
+            await page.click("text=Rent")
+        
+        # Type and Force Enter immediately
+        await page.fill(selector, f"{prop} {city}")
         await page.keyboard.press("Enter")
         
-        # Wait for the listing to actually appear
-        await asyncio.sleep(4) 
+        # Wait for the results to start appearing
+        await asyncio.sleep(5) 
         await cleanup_overlays(page)
         await page.evaluate("window.scrollTo(0, 0)")
         
         return await page.screenshot(full_page=False)
     except Exception as e:
-        print(f"Error on {site_config['name']}: {e}")
+        print(f"Error scraping {name}: {e}")
         return None
     finally:
         await page.close()
@@ -50,29 +59,30 @@ async def scrape(prop: str, city: str):
             browser = await p.chromium.connect_over_cdp(stealth_url)
             context = await browser.new_context(viewport={'width': 1280, 'height': 800})
 
-            # Configuration for the first two sites to stay under the 10s limit
+            # Define 3 sites to try simultaneously to stay under the limit
             configs = [
-                {"name": "NoBroker", "url": "https://www.nobroker.in/", "input": "input#listPageSearchLocality"},
-                {"name": "MagicBricks", "url": "https://www.magicbricks.com/", "input": "input#keyword"}
+                {"name": "NoBroker", "url": "https://www.nobroker.in/", "selector": "input#listPageSearchLocality"},
+                {"name": "Housing", "url": "https://housing.com/", "selector": "input.search-box"},
+                {"name": "MagicBricks", "url": "https://www.magicbricks.com/", "selector": "input#keyword"}
             ]
 
-            # Run both scrapers at the same time
-            tasks = [scrape_site(context, cfg, prop, city) for cfg in configs]
+            # Run all searches at once
+            tasks = [scrape_single_site(context, c['name'], c['url'], c['selector'], prop, city) for c in configs]
             screenshots = await asyncio.gather(*tasks)
             
-            # Filter out failed attempts
-            valid_shots = [Image.open(io.BytesIO(s)) for s in screenshots if s is not None]
-
-            if not valid_shots:
-                return {"error": "All sites timed out or failed to load data."}
+            # Combine successful screenshots
+            valid_images = [Image.open(io.BytesIO(s)) for s in screenshots if s is not None]
+            
+            if not valid_images:
+                return {"error": "Could not capture listings from any site. They may be blocking the bot."}
 
             # Stitch images vertically
-            total_height = sum(img.height for img in valid_shots)
+            total_height = sum(img.height for img in valid_images)
             combined = Image.new('RGB', (1280, total_height))
-            y_offset = 0
-            for img in valid_shots:
-                combined.paste(img, (0, y_offset))
-                y_offset += img.height
+            current_y = 0
+            for img in valid_images:
+                combined.paste(img, (0, current_y))
+                current_y += img.height
 
             output = io.BytesIO()
             combined.save(output, format='PNG')
