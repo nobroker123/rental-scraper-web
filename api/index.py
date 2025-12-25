@@ -7,7 +7,7 @@ app = FastAPI()
 
 @app.get("/")
 async def home():
-    return {"status": "Advanced Scraper Ready"}
+    return {"status": "Society-Specific Scraper Ready"}
 
 @app.get("/scrape")
 async def scrape(prop: str, city: str):
@@ -23,7 +23,7 @@ async def scrape(prop: str, city: str):
                 viewport={'width': 1280, 'height': 800}
             )
             
-            # Inject a "Watchdog" script that kills popups before they even render
+            # Watchdog script to kill popups instantly as they appear
             await context.add_init_script("""
                 const observer = new MutationObserver(() => {
                     const selectors = [
@@ -40,34 +40,38 @@ async def scrape(prop: str, city: str):
             """)
             
             page = await context.new_page()
-            formatted_prop = prop.replace(" ", "-").lower()
-            formatted_city = city.lower()
-            target_url = f"https://www.nobroker.in/property/rent/{formatted_city}/{formatted_prop}"
 
-            # 1. LOAD PAGE
-            await page.goto(target_url, wait_until="networkidle", timeout=60000)
+            # 1. START AT THE SEARCH PAGE
+            # We go to the main rent search page to ensure the search bar is present
+            await page.goto(f"https://www.nobroker.in/property/rent/{city.lower()}/", wait_until="networkidle", timeout=60000)
 
-            # 2. TRIGGER REAL DATA FETCH (The "Human" Interaction)
-            # We scroll, wait, and click a neutral area to wake up the site logic
-            await page.mouse.wheel(0, 600)
-            await asyncio.sleep(2)
-            await page.mouse.click(10, 10) # Click top-left corner to trigger event listeners
-            await page.mouse.wheel(0, -600)
-
-            # 3. STRICT CONTENT CHECK
-            # We wait specifically for the Rupee symbol (₹) to appear in a listing card.
-            # This is the "Gold Standard" proof that the gray boxes are gone.
-            try:
-                # Wait for the price selector class or the Rupee text
-                await page.wait_for_selector("xpath=//*[contains(text(), '₹')]", state="visible", timeout=20000)
-                print("✅ Actual listing detected.")
-            except:
-                print("⚠️ Data taking too long, capturing fallback...")
-
-            # 4. FINAL VIEW STABILIZATION
+            # 2. TYPE THE SOCIETY NAME
+            # We find the search box and type the property name
+            search_input = "input#listPageSearchLocality"
+            await page.wait_for_selector(search_input)
+            await page.fill(search_input, prop)
+            
+            # 3. SELECT FROM DROPDOWN
+            # We wait for the dropdown to appear and select the first suggestion
+            # This is the secret to getting the correct society listings
             await asyncio.sleep(2) 
+            await page.keyboard.press("ArrowDown")
+            await page.keyboard.press("Enter")
+            
+            # 4. CLICK SEARCH BUTTON
+            await page.click("button.prop-search-button")
 
-            # 5. CAPTURE
+            # 5. WAIT FOR ACTUAL LISTINGS
+            # We wait for the Rupee symbol to ensure the "Skeleton" boxes are gone
+            try:
+                await page.wait_for_selector("xpath=//*[contains(text(), '₹')]", state="visible", timeout=20000)
+                print(f"✅ Listings for {prop} loaded successfully.")
+            except:
+                print("⚠️ Listings taking time to load, capturing current state...")
+
+            # 6. FINAL SETTLE AND CAPTURE
+            await page.mouse.wheel(0, 400) # Slight scroll to trigger lazy images
+            await asyncio.sleep(2)
             screenshot_bytes = await page.screenshot(full_page=False)
             
             await browser.close()
