@@ -2,44 +2,23 @@ from fastapi import FastAPI, Response
 from playwright.async_api import async_playwright
 import os
 import asyncio
-import io
-from PIL import Image
 
 app = FastAPI()
 
-# Clean up function to save memory and clear view.
-async def cleanup(page):
-    try:
-        await page.evaluate("""() => {
-            const boxes = ['.modal', '.nb-tp-container', '.chat-widget-container', '.tooltip', '#common-login'];
-            boxes.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
-        }""")
-    except: pass
-
-async def get_screenshot(context, site, prop, city):
-    page = await context.new_page()
-    try:
-        # 1. Faster Navigation
-        await page.goto(site["url"], wait_until="commit", timeout=20000)
-        await cleanup(page)
-        
-        # 2. Search Logic
-        await page.fill(site["input"], f"{prop} {city}")
-        await page.keyboard.press("Enter")
-        
-        # 3. Wait for data - reduced time to prevent Vercel crash
-        await asyncio.sleep(6) 
-        await cleanup(page)
-        await page.evaluate("window.scrollTo(0, 0)")
-        
-        # 4. Take Screenshot
-        img_bytes = await page.screenshot(type='jpeg', quality=50) # JPEG is lighter than PNG
-        return Image.open(io.BytesIO(img_bytes))
-    except Exception as e:
-        print(f"Error on {site['url']}: {e}")
-        return None
-    finally:
-        await page.close()
+async def cleanup_overlays(page):
+    """Aggressively removes popups and backdrops that block the view."""
+    await page.evaluate("""() => {
+        const selectors = [
+            '.nb-search-along-metro-popover', '.modal', '.chat-widget-container', 
+            '.tooltip', '.nb-tp-container', '#common-login', '.joyride-step__container',
+            '.modal-backdrop', '.p-4.text-center', '.close', '.nearby-locality-container'
+        ];
+        selectors.forEach(s => {
+            document.querySelectorAll(s).forEach(el => el.remove());
+        });
+        document.body.classList.remove('modal-open');
+        document.body.style.overflow = 'auto';
+    }""")
 
 @app.get("/scrape")
 async def scrape(prop: str, city: str):
@@ -47,40 +26,62 @@ async def scrape(prop: str, city: str):
     async with async_playwright() as p:
         try:
             raw_url = os.getenv("BROWSER_URL")
-            # Connect to external browser to save Vercel memory
-            browser = await p.chromium.connect_over_cdp(raw_url)
-            context = await browser.new_context(viewport={'width': 1000, 'height': 800})
+            # Using stealth to avoid 'bot' detection
+            stealth_url = raw_url.replace("/chromium", "/chromium/stealth") if "/chromium" in raw_url else raw_url
+            browser = await p.chromium.connect_over_cdp(stealth_url)
+            
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+                viewport={'width': 1280, 'height': 800}
+            )
+            page = await context.new_page()
 
-            targets = [
-                {"url": "https://www.nobroker.in/", "input": "input#listPageSearchLocality"},
-                {"url": "https://www.magicbricks.com/", "input": "input#keyword"}
-            ]
+            # 1. Navigate to NoBroker
+            await page.goto("https://www.nobroker.in/", wait_until="domcontentloaded", timeout=60000)
+            await cleanup_overlays(page)
 
-            # Run tasks one by one to avoid memory spikes on Vercel Free
-            images = []
-            for target in targets:
-                img = await get_screenshot(context, target, prop, city)
-                if img:
-                    images.append(img)
+            # 2. Select Rent Tab
+            await page.click("text=Rent")
 
-            if not images:
-                return {"error": "All sites failed to load. Check logs."}
+            # 3. Type Society Name and Wait for Dropdown
+            search_input = "input#listPageSearchLocality"
+            await page.fill(search_input, f"{prop} {city}")
+            
+            # CRITICAL: Wait for the suggestion list to actually appear
+            # NoBroker uses '.autocomplete-dropdown' or similar
+            try:
+                await page.wait_for_selector(".suggestion-item, .autocomplete-dropdown", timeout=5000)
+                await page.keyboard.press("ArrowDown")
+                await page.keyboard.press("Enter")
+            except:
+                # Fallback if dropdown doesn't show: just hit Enter
+                await page.keyboard.press("Enter")
 
-            # Stitch Images
-            widths, heights = zip(*(i.size for i in images))
-            total_height = sum(heights)
-            max_width = max(widths)
+            # 4. Click Search and WAIT FOR NAVIGATION OR CONTENT
+            # We use a Promise to wait for the network to go quiet after the click
+            await asyncio.gather(
+                page.click("button.prop-search-button"),
+                page.wait_for_load_state("networkidle")
+            )
 
-            combined = Image.new('RGB', (max_width, total_height))
-            y_offset = 0
-            for im in images:
-                combined.paste(im, (0, y_offset))
-                y_offset += im.height
+            # 5. VERIFY LISTINGS ARE PRESENT
+            # We look for the Rupee symbol (₹) which only appears in listing cards
+            try:
+                await page.wait_for_selector("text=₹", timeout=15000)
+                # Scroll a bit to trigger 'Lazy Loading' of images
+                await page.evaluate("window.scrollTo(0, 500)")
+                await asyncio.sleep(1)
+                await page.evaluate("window.scrollTo(0, 0)")
+            except:
+                print("Results did not load in time.")
 
-            # Export
-            buf = io.BytesIO()
-            combined.save(buf, format='JPEG', quality=60)
-            return Response(content=buf.getvalue(), media_type="image/jpeg")
+            # 6. Final cleanup of any 'Login' popups that triggered on search
+            await cleanup_overlays(page)
+            
+            # Take screenshot of the result area
+            screenshot_bytes = await page.screenshot(full_page=False)
+            
+            return Response(content=screenshot_bytes, media_type="image/png")
 
         except Exception as e:
             return {"error": str(e)}
