@@ -7,7 +7,7 @@ from PIL import Image
 
 app = FastAPI()
 
-# Clean up function to save memory and clear view
+# Clean up function to save memory and clear view.
 async def cleanup(page):
     try:
         await page.evaluate("""() => {
