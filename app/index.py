@@ -6,78 +6,76 @@ import asyncio
 app = FastAPI()
 
 async def cleanup_overlays(page):
-    """Aggressively removes popups and backdrops that block the view."""
-    try:
-        await page.evaluate("""() => {
-            const selectors = [
-                '.nb-search-along-metro-popover', '.modal', '.chat-widget-container', 
-                '.tooltip', '.nb-tp-container', '#common-login', '.joyride-step__container',
-                '.modal-backdrop', '.p-4.text-center', '.close', '.nearby-locality-container'
-            ];
-            selectors.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
-            document.body.classList.remove('modal-open');
-            document.body.style.overflow = 'auto';
-        }""")
-    except: pass
+    """Removes annoying popups that block the view or interactions."""
+    await page.evaluate("""() => {
+        const selectors = [
+            '.nb-search-along-metro-popover', '.modal', '.chat-widget-container', 
+            '.tooltip', '.nb-tp-container', '#common-login', '.joyride-step__container'
+        ];
+        selectors.forEach(s => {
+            document.querySelectorAll(s).forEach(el => el.remove());
+        });
+        document.body.classList.remove('modal-open');
+        document.body.style.overflow = 'auto';
+    }""")
+
+@app.get("/")
+async def home():
+    return {"status": "Society Search Scraper Ready"}
 
 @app.get("/scrape")
 async def scrape(prop: str, city: str):
     browser = None
     async with async_playwright() as p:
         try:
-            # 1. CONNECT & SETUP
             raw_url = os.getenv("BROWSER_URL")
             stealth_url = raw_url.replace("/chromium", "/chromium/stealth") if "/chromium" in raw_url else raw_url
             browser = await p.chromium.connect_over_cdp(stealth_url)
             
-            # Set a high default timeout for the whole session (60 seconds)
-            context = await browser.new_context(viewport={'width': 1280, 'height': 900})
-            context.set_default_timeout(60000) 
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+                viewport={'width': 1280, 'height': 800}
+            )
             page = await context.new_page()
 
-            # 2. NAVIGATE (Wait only for basic HTML to save time)
-            await page.goto("https://www.nobroker.in/", wait_until="domcontentloaded", timeout=60000)
+            # 1. GO TO HOME PAGE INSTEAD OF DIRECT LINK
+            await page.goto("https://www.nobroker.in/", wait_until="networkidle", timeout=60000)
             await cleanup_overlays(page)
 
-            # 3. PERFORM SEARCH
+            # 2. SELECT RENT TAB
             await page.click("text=Rent")
+
+            # 3. TYPE SOCIETY NAME
+            # We type the property name into the search box
             search_input = "input#listPageSearchLocality"
-            await page.fill(search_input, f"{prop} {city}")
-            
-            # Wait for dropdown and select
+            await page.fill(search_input, prop)
+            await asyncio.sleep(2) # Wait for dropdown results
+
+            # 4. SELECT FIRST RESULT FROM DROPDOWN
+            # This ensures we get the correct society page
+            await page.keyboard.press("ArrowDown")
+            await page.keyboard.press("Enter")
+
+            # 5. CLICK SEARCH
+            await page.click("button.prop-search-button")
+
+            # 6. WAIT FOR LISTINGS TO LOAD
+            # We wait for the price symbol to confirm real listings are visible
             try:
-                await page.wait_for_selector(".suggestion-item", timeout=10000)
-                await page.keyboard.press("ArrowDown")
-                await page.keyboard.press("Enter")
+                await page.wait_for_selector("xpath=//*[contains(text(), '₹')]", timeout=20000)
+                print("✅ Listings loaded.")
             except:
-                await page.keyboard.press("Enter")
+                print("⚠️ Search taking time, attempting cleanup and capture...")
 
-            # 4. TRIGGER SEARCH & WAIT FOR REDIRECT
-            # We wait for the URL to change or the 'networkidle' state
-            await asyncio.gather(
-                page.click("button.prop-search-button"),
-                page.wait_for_load_state("networkidle", timeout=45000)
-            )
-
-            # 5. VERIFY LISTINGS LOADED (The Rupee Test)
-            # We look for the currency symbol '₹' which confirms property cards are present
-            print("Verifying listings...")
-            try:
-                await page.wait_for_selector("text=₹", timeout=30000)
-                # Scroll to trigger 'Lazy Loading' of listing images
-                await page.evaluate("window.scrollTo(0, 600)")
-                await asyncio.sleep(2)
-                await page.evaluate("window.scrollTo(0, 0)")
-            except Exception as e:
-                print(f"Verification failed: {e}")
-
-            # 6. FINAL CAPTURE
+            # 7. FINAL CLEANUP & SCREENSHOT
             await cleanup_overlays(page)
-            screenshot_bytes = await page.screenshot(full_page=False, type='jpeg', quality=70)
+            await asyncio.sleep(2)
+            screenshot_bytes = await page.screenshot(full_page=False)
             
-            return Response(content=screenshot_bytes, media_type="image/jpeg")
+            await browser.close()
+            return Response(content=screenshot_bytes, media_type="image/png")
 
         except Exception as e:
-            return {"error": f"Scrape Failed: {str(e)}"}
-        finally:
             if browser: await browser.close()
+            return {"error": str(e)}
+
