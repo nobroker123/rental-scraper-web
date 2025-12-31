@@ -1,12 +1,9 @@
 {
-  "version": 2,
-  "functions": {
-    "app/index.py": {
-      "maxDuration": 300,
-      "memory": 1024
+  "rewrites": [
+    { 
+      "source": "/(.*)", 
+      "destination": "/api/index.py" 
     }
-  },
-  "routes": [
-    { "src": "/(.*)", "dest": "app/index.py" }
   ]
 }
+
